@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import requests
+from pathlib import Path
+
+CONFIG_FILE = Path.home() / ".neo"
+
+def load_config():
+    config = {}
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            for line in f:
+                if "=" in line:
+                    key, value = line.strip().split("=", 1)
+                    config[key] = value
+    return config
+
+def save_config_var(key, value):
+    config = load_config()
+    config[key] = value
+    with open(CONFIG_FILE, "w") as f:
+        for k, v in config.items():
+            f.write(f"{k}={v}\n")
+
+def ask_config_var(key, prompt_text, secret=False):
+    try:
+        if secret:
+            import getpass
+            value = getpass.getpass(prompt_text + ": ")
+        else:
+            value = input(prompt_text + ": ").strip()
+        if value:
+            save_config_var(key, value)
+        return value
+    except KeyboardInterrupt:
+        print("\nCancelado.")
+        sys.exit(1)
+
+def get_config(key, prompt_text=None, secret=False, default=None):
+    env_val = os.getenv(key)
+    if env_val:
+        return env_val
+    config = load_config()
+    if key in config:
+        return config[key]
+    if prompt_text:
+        return ask_config_var(key, prompt_text, secret)
+    return default
+
+def list_ollama_models(ollama_host):
+    try:
+        response = requests.get(f"{ollama_host}/api/tags")
+        response.raise_for_status()
+        return [m["name"] for m in response.json().get("models", [])]
+    except Exception as e:
+        print(f"[Erro ao listar modelos do Ollama]: {e}")
+        return []
+
+def list_openai_models(api_key):
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.models.list()
+        return sorted([model.id for model in response.data if "gpt" in model.id])
+    except Exception as e:
+        print(f"[Erro ao listar modelos do OpenAI]: {e}")
+        return []
+
+def choose_model(use_ollama, api_key, ollama_host):
+    models = list_ollama_models(ollama_host) if use_ollama else list_openai_models(api_key)
+    if not models:
+        print("Nenhum modelo encontrado.")
+        sys.exit(1)
+
+    print("\nModelos disponíveis:")
+    for i, model in enumerate(models, start=1):
+        print(f"{i}. {model}")
+
+    while True:
+        choice = input("Escolha o número do modelo desejado: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(models):
+            return models[int(choice) - 1]
+        else:
+            print("Escolha inválida. Tente novamente.")
+
+def call_ollama(model, messages, ollama_host):
+    try:
+        response = requests.post(
+            f"{ollama_host}/api/chat",
+            json={
+                "model": model,
+                "messages": messages,
+                "stream": False
+            }
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["message"]["content"].strip()
+    except Exception as e:
+        return f"[Erro no Ollama]: {e}"
+
+def call_openai(model, messages, api_key):
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"[Erro no OpenAI]: {e}"
+
+def main():
+    config = load_config()
+
+    use_ollama = get_config("NEO_USE_OLLAMA", default="false").lower() == "true"
+    ollama_host = get_config("NEO_OLLAMA_HOST", default="http://localhost:11434")
+
+    api_key = None
+    if not use_ollama:
+        api_key = get_config("NEO_API_KEY", "Informe sua OpenAI API Key", secret=True)
+
+    model = os.getenv("NEO_MODEL") or config.get("NEO_MODEL")
+    if not model:
+        model = choose_model(use_ollama, api_key, ollama_host)
+        save_config_var("NEO_MODEL", model)
+
+    prompt = " ".join(sys.argv[1:]).strip()
+    if not prompt:
+        print("Uso: neo <mensagem>")
+        sys.exit(1)
+
+    context = get_config("NEO_CONTEXT", default="")
+    messages = []
+    if context:
+        messages.append({"role": "system", "content": context})
+    messages.append({"role": "user", "content": prompt})
+
+    if use_ollama:
+        reply = call_ollama(model, messages, ollama_host)
+    else:
+        reply = call_openai(model, messages, api_key)
+
+    print(f"\n{reply}\n")
+
+if __name__ == "__main__":
+    main()
